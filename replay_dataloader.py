@@ -67,16 +67,20 @@ transforms_map = {
 
 # 1. Image & Label paths
 dataset_map = {
-        "prostate" : {
-            "data_dir" : "replay_buffer/prostate/",
+        "prostate158" : {
+            "data_dir" : "replay_buffer/prostate158/",
             'train' :  {'images' : [], 'labels' : []}
             },
-        "spleen" : {
-            "data_dir" : "replay_buffer/spleen/",
+        "isbi" : {
+            "data_dir" : "replay_buffer/isbi/",
             'train' :  {'images' : [], 'labels' : []}
             },
-        "hippo" : {
-            "data_dir" : "replay_buffer/hippo/",
+        "promise12" : {
+            "data_dir" : "replay_buffer/promise12/",
+            'train' :  {'images' : [], 'labels' : []}
+            },
+        "decathlon" : {
+            "data_dir" : "replay_buffer/decathlon/",
             'train' :  {'images' : [], 'labels' : []}
             }
         

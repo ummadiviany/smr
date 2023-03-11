@@ -52,15 +52,16 @@ parser.add_argument('--store_samples', type=int, help='No of samples to store fo
 parser.add_argument('--seed', type=int, help='Seed for the experiment')
 parser.add_argument('--wandb_log', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--order_reverse', default=False, action=argparse.BooleanOptionalAction)
-parser.add_argument('--sampling_strategy', type=str, help='Sampling strategy for replay buffer')
+parser.add_argument('--sampling_strategy', type=str, default='random', help='Sampling strategy for replay buffer')
 parser.add_argument('--cropstore', default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument('--fbr', type=float, default=1.0, help='Foreground/background ratio for replay buffer')
 
 parser.add_argument('--filename', type=str, help='Name of the file to save the model')
 parser.add_argument('--l2reg', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--alpha', type=float, default=0.1, help='Lambda for l2 regularization')
 parser.add_argument('--ewc', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--ewc_weight', type=float, default=1.0, help='Lambda for EWC regularization')
-
+parser.add_argument('--latent_replay', default=False, action=argparse.BooleanOptionalAction)
 
 parsed_args = parser.parse_args()
 
@@ -86,6 +87,7 @@ ewc = parsed_args.ewc
 ewc_weight = parsed_args.ewc_weight
 l2reg = parsed_args.l2reg
 alpha = parsed_args.alpha
+latent_replay = parsed_args.latent_replay
 
 if order_reverse:
     domain_order = domain_order[::-1]
@@ -168,6 +170,48 @@ if l2reg:
     l2_regulizer = L2Reg(alpha)
 if ewc:
     ewc_regulizer = ewc = EWC(model=model, weight=ewc_weight)
+
+# -----------------------------------------------------------------------
+import random
+model_layer_map = {}
+for name, module in model.named_modules():
+    model_layer_map[name] = module
+    
+def get_model_layer(layer_name):
+    return model_layer_map[layer_name]
+
+activation = {}
+def get_activation(name):
+    def hook(model, input, output):
+        activation[name] = output.detach()
+    return hook
+
+model_layer_name = 'model.1.submodule.1.submodule.1.submodule.1.submodule.conv.unit2.adn.A'
+model_layer = get_model_layer(model_layer_name)
+
+replay_memory = []
+l1_loss = nn.L1Loss()
+
+@torch.no_grad()
+def accumulate_latent_replay_memory():
+    print('-'*100)
+    print("Accumulating replay memory...")
+    print(f"Storing {store_samples} latent representations for {dataset_name.capitalize()} to replay buffer")
+    
+    for _ in range(store_samples):
+        imgs, _, _ = next(iter(dataloaders_map[dataset_name]['train']))
+        imgs = imgs.to(device)
+        imgs = rearrange(imgs, 'b c h w d -> (b d) c h w')
+        
+        model_layer.register_forward_hook(get_activation(model_layer_name))
+        _ = model(imgs)
+        latent_representation = activation[model_layer_name]
+        print(f"Latent representation shape : {latent_representation.shape}")
+        replay_memory.append(latent_representation.cpu())
+
+    print(f"Current replay memory size : {len(replay_memory)}")
+    print('-'*100)
+    
 # --------------------------------------------------------------------
 
 def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
@@ -186,25 +230,30 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
     for i, (imgs, labels, index) in enumerate(train_loader, 1):
         
         index = index.item()
-        if dataset_name == domain_order[0] and epoch == 1:
+        if epoch == 1:
             # Positive class ranking
             pos_precentage = labels.sum() / labels.numel()
             pos_class_map[dataset_name][index] = pos_precentage.item()
             
             
-        if sampling_strategy == 'importance' or cropstore == True:
-            # Find the sample importance using gradients
+        if sampling_strategy == 'gpcc' or cropstore == True:
+            # Find the sample importance using gradients difference
             if index not in importance_map[dataset_name]:
                 importance_map[dataset_name][index] = 0
+            if i != 1:
+                imgsi, labelsi = imgs.to(device), labels.to(device)
+                imgsi = rearrange(imgsi, 'b c h w d -> (b d) c h w')
+                labelsi = rearrange(labelsi, 'b c h w d -> (b d) c h w')
+                loss = dice_ce_loss(model(imgsi), labelsi)
+                loss.backward()
+                curr_grads = {name:param.grad.data.detach().clone().cpu() for name, param in model.named_parameters() if param.grad is not None}
+                if index not in prev_grads_map[dataset_name]:
+                    prev_grads_map[dataset_name][index] = curr_grads
+                importance_map[dataset_name][index] += get_importance(curr_grads, prev_grads_map[dataset_name][index])
+                prev_grads_map[dataset_name][index] = curr_grads
                 
-            imgs, labels = imgs.to(device), labels.to(device)
-            loss = dice_ce_loss(model(imgs), labels)
-            loss.backward()
-            curr_grads = model.parameters.grad.data.detach().clone().cpu()
-            importance_map[dataset_name][index] += get_importance(curr_grads, prev_grads_map[dataset_name][index])
-            prev_grads_map[dataset_name][index] = curr_grads
-            
-            # torch.cuda.empty_cache()
+                optimizer.zero_grad()
+                torch.cuda.empty_cache()
         
         if em_loader is not None:
             if isinstance(em_loader, dict):
@@ -217,7 +266,7 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
                 imgs, labels = torch.cat([imgs, *replay_imgs], dim=-1), torch.cat([labels, *replay_labels], dim=-1)
                 
             else:   
-                em_imgs, em_labels = next(iter(em_loader))
+                em_imgs, em_labels, _ = next(iter(em_loader))
                 # Stacking up batch from current dataset and episodic memeory 
                 imgs, labels = torch.cat([imgs, em_imgs], dim=-1), torch.cat([labels, em_labels], dim=-1)
         
@@ -244,6 +293,17 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
             # Adding EWC regularization loss to the main loss
             ewc_loss = ewc.compute_consolidation_loss()
             loss += ewc_loss
+            
+        if latent_replay and dataset_name != domain_order[0]:
+            # Sample one latent representation from replay memory
+            replay_sample = random.sample(replay_memory, 1)[0].to(device)
+            
+            # Compute L1 loss for representation replay samples and add to total loss
+            model_layer.register_forward_hook(get_activation(model_layer_name))
+            latent_representation = activation[model_layer_name]
+            
+            latent_loss = torch.abs(replay_sample.mean() - latent_representation.mean())
+            loss += latent_loss
         
         preds = [post_pred(i) for i in decollate_batch(preds)]
         preds = torch.stack(preds)
@@ -281,6 +341,7 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
     dice_metric.reset()
     hd_metric.reset()
     scheduler.step()
+    torch.cuda.empty_cache()
     
     # Sort and normalize the importance_map and pos_class_map
     if sampling_strategy == 'importance':
@@ -372,6 +433,11 @@ def accumulate_replay_buffer(sampling_strategy : str = 'random'):
         idxs = list(map(int, idxs[:store_samples]))
     elif sampling_strategy == 'random':
         idxs = sample(idxs, store_samples)
+    elif sampling_strategy == 'gpcc':
+        print("Using GPCC")
+        pcridxs = sample(pos_class_map[dataset_name].keys(), store_samples//2)
+        gbridxs = sample(importance_map[dataset_name].keys(), store_samples//2)
+        idxs = pcridxs + gbridxs
         
     idxs = list(map(int, idxs))
     img_paths = [idx2imgpath[dataset_name][str(idx)] for idx in idxs]
@@ -410,7 +476,7 @@ optimizer_params  = {
 
 models_map = {}
 test_metrics = []
-epochs_list = [100, 75, 50, 25]
+epochs_list = [80, 60, 40, 20]
 # epochs_list = [initial_epochs]*len(domain_order)
 # epochs_list = [1, 1, 1, 1]
 
@@ -481,6 +547,9 @@ for i, dataset_name in enumerate(domain_order, 1):
     if ewc:
         print("Updating model weights with EWC Constraint")
         ewc.register_ewc_params(train_loader)
+    
+    if latent_replay:
+        accumulate_latent_replay_memory()
         
 
 

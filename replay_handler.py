@@ -53,7 +53,7 @@ class CropRoI(monai.transforms.Transform):
             cropped = monai.transforms.RandSpatialCrop(roi_size= self.roi_size, random_center = True, random_size=False)(data)
             return cropped
         else:
-            cropped = data[:, self.center[0] - self.roi_size[0]//2 : self.center[0] + self.roi_size[0]//2,
+            cropped = data[self.center[0] - self.roi_size[0]//2 : self.center[0] + self.roi_size[0]//2,
                            self.center[1] - self.roi_size[1]//2 : self.center[1] + self.roi_size[1]//2,
                            :]
             return cropped
@@ -83,6 +83,7 @@ def crop_save(
     img_paths : list,
     label_paths : list,
     dataset_name : str,
+    fbr : float = 1.0,
 ):
     # Create a new directory for storing the images and labels sampled from the dataset
     if not os.path.exists('replay_buffer'):
@@ -92,20 +93,38 @@ def crop_save(
         os.makedirs(f'replay_buffer/{dataset_name}/imagesTr')
         os.makedirs(f'replay_buffer/{dataset_name}/labelsTr')
         
-    transforms = [AddChannel(),
+    foreground_idx = int(fbr * len(img_paths))
+        
+    foreground_transforms = [AddChannel(),
                   CropRoI(roi_size=roi_size[dataset_name], center=centers[dataset_name], random_center=False),
             ]
+
+    background_transforms = [AddChannel(),
+                             RandSpatialCrop(roi_size=(roi_size[dataset_name], roi_size[dataset_name], -1), random_center=True, random_size=False),
+    ]
     
     print(f"Img paths: {img_paths}")
     
-    dataset = ImageDataset(img_paths, label_paths,
-                               transform=Compose(transforms),
-                               seg_transform=Compose(transforms))
+    dataset = ImageDataset(img_paths[:foreground_idx], label_paths[:foreground_idx],
+                               transform=Compose(foreground_transforms),
+                               seg_transform=Compose(foreground_transforms))
     
-    for i, (img, label) in enumerate(dataset):
-     
+    for i in range(len(img_paths)):
+        img = nib.load(img_paths[i]).get_fdata()
+        label = nib.load(label_paths[i]).get_fdata()
+        
         print(f'img shape: {img.shape}')
         print(f'label shape: {label.shape}')
+         
+        # add_channel = AddChannel()
+        # img, label = add_channel(img), add_channel(label)
+        
+        if dataset_name in ['prostate158', 'isbi', 'promise12', 'decathlon']:
+            croproi = CropRoI(roi_size=roi_size[dataset_name], center=label.shape[1]//2, random_center=False)
+        
+        img, label = croproi(img), croproi(label)
+        print(f'Crop RoI img shape: {img.shape}')
+        print(f'Crop RoI label shape: {label.shape}')
         
         # Save the image and label in .nii.gz format
         nib.save(nib.Nifti1Image(img.squeeze(), np.eye(4)), f'replay_buffer/{dataset_name}/imagesTr/img_{i}.nii.gz')
@@ -113,6 +132,16 @@ def crop_save(
         print(f'img_{i}.nii.gz and label_{i}.nii.gz saved in replay_buffer/{dataset_name}')
         
     
+    if fbr < 1.0:
+        dataset = ImageDataset(img_paths[foreground_idx:], label_paths[foreground_idx:],
+                                   transform=Compose(background_transforms),
+                                   seg_transform=Compose(background_transforms))
+
+        for i, (img, label) in enumerate(dataset):
+            # Save the image and label in .nii.gz format
+            nib.save(nib.Nifti1Image(img.squeeze(), np.eye(4)), f'replay_buffer/{dataset_name}/imagesTr/img_{i+foreground_idx}.nii.gz')
+            nib.save(nib.Nifti1Image(label.squeeze(), np.eye(4)), f'replay_buffer/{dataset_name}/labelsTr/label_{i+foreground_idx}.nii.gz')
+            print(f'img_{i+foreground_idx}.nii.gz and label_{i+foreground_idx}.nii.gz saved in replay_buffer/{dataset_name}')
     
 if __name__ == "__main__":
     idx2imgpath = json.load(open('idx2imgpath.json'))

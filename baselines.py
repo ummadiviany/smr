@@ -1,3 +1,5 @@
+import torch
+
 # ----------------------------------------------------------------------------------------------------
 
 class EWC:
@@ -12,7 +14,7 @@ class EWC:
             
     def update_fisher_params(self, data_loader):
         buff_param_names = [param[0].replace('.', '__') for param in self.model.named_parameters()]
-        for _buff_param_name, param in zip(buff_param_names, model.parameters()):
+        for _buff_param_name, param in zip(buff_param_names, self.model.parameters()):
             self.model.register_buffer(_buff_param_name+'_estimated_fisher', param.grad.data.clone() ** 2)
             
     def register_ewc_params(self, data_loader):

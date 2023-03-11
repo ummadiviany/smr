@@ -1,0 +1,17 @@
+datasets/
+**/datasets/
+**/wandb/
+__pycache__/*
+*.pyc
+*.pyo
+*.pyd
+**/weights/*
+ewc/data/*
+spleen/
+viz/
+# hippo/
+taskinc/seq/replay_buffer/
+*pth
+taskinc/models/*
+taskinc/results/artifacts/*
+models/*

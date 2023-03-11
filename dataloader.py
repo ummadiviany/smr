@@ -18,7 +18,7 @@ from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceLoss, FocalLoss, GeneralizedDiceLoss, DiceCELoss, DiceFocalLoss
 from monai.networks.nets import UNet, VNet, UNETR, SwinUNETR, AttentionUnet
-from monai.data import decollate_batch, ImageDataset
+from monai.data import decollate_batch
 from monai.utils import set_determinism
 import os
 import wandb
@@ -28,6 +28,7 @@ from einops.layers.torch import Rearrange
 from torch.optim.lr_scheduler import ExponentialLR, CosineAnnealingLR
 from random import sample
 from torchvision.transforms import ToPILImage
+from dataset import ImageDataset
 
 seed = 2000
 torch.manual_seed(seed)
@@ -87,20 +88,44 @@ transforms_map = {
 
 # 1. Image & Label paths
 dataset_map = {
-        "prostate" : {
-            "data_dir" : "../../prostate/dec_resized/",
+        # "prostate" : {
+        #     "data_dir" : "../../prostate/dec_resized/",
+        #     "test_size" : 0.2,
+        #     'test' :  {'images' : [], 'labels' : []},
+        #     'train' :  {'images' : [], 'labels' : []}
+        #     },
+        # "spleen" : {
+        #     "data_dir" : "../../spleen_hc/dec_hc_resized/",
+        #     "test_size" : 0.2,
+        #     'test' :  {'images' : [], 'labels' : []},
+        #     'train' :  {'images' : [], 'labels' : []}
+        #     },
+        # "hippo" : {
+        #     "data_dir" : "../../hippo/drayd_pax/",
+        #     "test_size" : 0.2,
+        #     'test' :  {'images' : [], 'labels' : []},
+        #     'train' :  {'images' : [], 'labels' : []}
+        #     },   
+        "prostate158" : {
+            "data_dir" : "../cl/datasets/prostate158aligned/",
             "test_size" : 0.2,
             'test' :  {'images' : [], 'labels' : []},
             'train' :  {'images' : [], 'labels' : []}
             },
-        "spleen" : {
-            "data_dir" : "../../spleen_hc/dec_hc_resized/",
+        "promise12" : {
+            "data_dir" : "../cl/datasets/promise12prostatealigned/",
             "test_size" : 0.2,
             'test' :  {'images' : [], 'labels' : []},
             'train' :  {'images' : [], 'labels' : []}
             },
-        "hippo" : {
-            "data_dir" : "../../hippo/drayd_pax/",
+        "isbi" : {
+            "data_dir" : "../cl/datasets/isbiprostatealigned/",
+            "test_size" : 0.2,
+            'test' :  {'images' : [], 'labels' : []},
+            'train' :  {'images' : [], 'labels' : []}
+            },
+        "decathlon" : {
+            "data_dir" : "../cl/datasets/decathlonprostatealigned/",
             "test_size" : 0.2,
             'test' :  {'images' : [], 'labels' : []},
             'train' :  {'images' : [], 'labels' : []}

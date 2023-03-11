@@ -62,15 +62,28 @@ print(f"Seed : {seed}")
 torch.manual_seed(seed)
 set_determinism(seed=seed)
 # ----------------------------Get Dataloaders--------------------------------------------
+
 dataloaders_map, dataset_map = get_dataloaders()
 
-# ----------------------------Train Config-----------------------------------------
+# Create a joint train loader for all datasets
+img_paths = []
+label_paths = []
+for dataset in dataset_map:
+    img_paths += dataset_map[dataset]['train']['images']
+    label_paths += dataset_map[dataset]['train']['labels']
+joint_train_loader = get_dataloader(
+    img_paths = img_paths,
+    label_paths = label_paths,
+    train = True,
+)
+
+# ----------------------------Train Config-----------------------------------------------
 
 model = UNet(
         spatial_dims=2,
         in_channels=1,
         out_channels=2,
-        channels=(16, 32, 64, 128, 256),
+        channels=(32, 64, 128, 256, 512),
         strides=(2, 2, 2, 2),
         num_res_units=3,
     ).to(device)
@@ -81,7 +94,7 @@ dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nan
 hd_metric = HausdorffDistanceMetric(include_background=False, percentile = 95.)
 post_pred = Compose([
     EnsureType(), AsDiscrete(argmax=True, to_onehot=2),
-    # KeepLargestConnectedComponent(applied_labels=[1], is_onehot=True, connectivity=2)
+    KeepLargestConnectedComponent(applied_labels=[1], is_onehot=True, connectivity=2)
 ])
 post_label = Compose([EnsureType(), AsDiscrete(to_onehot=2)])
 argmax = AsDiscrete(argmax=True)
@@ -116,7 +129,7 @@ config = {
 
 if wandb_log:
     wandb.login()
-    wandb.init(project="TaskInc_Joint", entity="vinayu", config = config)
+    wandb.init(project="CL_Joint", entity="vinayu", config = config)
     
 batch_size = 1
 test_shuffle = True
@@ -124,7 +137,7 @@ val_interval = 5
 batch_interval = 25
 img_log_interval = 15
 log_images = True
-iterations = 30
+# iterations = 30
 
 def train(train_loaders : dict, em_loader : DataLoader = None):
     """
@@ -140,21 +153,10 @@ def train(train_loaders : dict, em_loader : DataLoader = None):
     
     
     # Iterating over the dataset
-    for i in range(iterations):
+    for i, (imgs, labels) in enumerate(joint_train_loader):
         
-        p_imgs, p_labels = next(iter(train_loaders['prostate']['train']))
-        h_imgs, h_labels = next(iter(train_loaders['hippo']['train']))
-        s_imgs, s_labels = next(iter(train_loaders['spleen']['train']))
-        
-        # print(f"Prostate : {p_imgs.shape}, {p_labels.shape}")
-        # print(f"Hippo : {h_imgs.shape}, {h_labels.shape}")
-        # print(f"Spleen : {s_imgs.shape}, {s_labels.shape}")
-        
-        imgs = torch.cat([p_imgs, h_imgs, s_imgs], dim=-1)
-        labels = torch.cat([p_labels, h_labels, s_labels], dim=-1)
         imgs, labels = imgs.to(device), labels.to(device)
         
-        # print(f"Concatenated : {imgs.shape}, {labels.shape}")
         
         imgs = rearrange(imgs, 'b c h w d -> (b d) c h w')
         labels = rearrange(labels, 'b c h w d -> (b d) c h w')
@@ -180,17 +182,17 @@ def train(train_loaders : dict, em_loader : DataLoader = None):
         epoch_loss += loss.item()
 
         if i % batch_interval == 0:
-            print(f"Epoch: [{epoch}/{epochs}], Batch: [{i}/{iterations}], Loss: {loss.item() :.4f}, \
+            print(f"Epoch: [{epoch}/{epochs}], Batch: [{i}/{len(joint_train_loader)}], Loss: {loss.item() :.4f}, \
                   Dice: {dice_metric.aggregate().item() * 100 :.2f}, HD: {hd_metric.aggregate().item() :.2f}")
     
     # Print metrics, log data, reset metrics
     
-    print(f"\nEpoch: [{epoch}/{epochs}], Avg Loss: {epoch_loss / iterations :.3f}, \
+    print(f"\nEpoch: [{epoch}/{epochs}], Avg Loss: {epoch_loss / len(joint_train_loader) :.3f}, \
               Train Dice: {dice_metric.aggregate().item() * 100 :.2f}, Train HD: {hd_metric.aggregate().item() :.2f}, Time : {int(time() - train_start)} sec")
 
     log_metrics = {f"Train Dice" : dice_metric.aggregate().item() * 100,
                    f"Train HD" : hd_metric.aggregate().item(),
-                   f"Train Loss" : epoch_loss / iterations,
+                   f"Train Loss" : epoch_loss / len(joint_train_loader),
                    # "Learning Rate" : scheduler.get_last_lr()[0],
                    f"Epoch" : epoch }
     if wandb_log:
@@ -213,7 +215,7 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
     model.eval()
     with torch.no_grad():
         # Iterate over all samples in the dataset
-        for i, (imgs, labels) in enumerate(test_loader, 1):
+        for i, (imgs, labels, index) in enumerate(test_loader, 1):
             imgs, labels = imgs.to(device), labels.to(device)
             imgs = rearrange(imgs, 'b c h w d -> (b d) c h w')
             labels = rearrange(labels, 'b c h w d -> (b d) c h w')
@@ -252,7 +254,7 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
     
 # -------------------------------Training Loop----------------------------------------
 
-test_dataset_names = ['prostate', 'hippo', 'spleen']
+test_dataset_names = ['prostate158', 'isbi', 'promise12', 'decathlon']
 
 for epoch in range(1, epochs+1):   
 
@@ -272,3 +274,7 @@ for epoch in range(1, epochs+1):
                 wandb.log(log_metrics)
                 print(f'Logged {dname} test metrics to wandb')
                 
+                
+# Save the model
+filename = f'prostate_joint'
+torch.save(model.state_dict(), f"{filename}.pth")

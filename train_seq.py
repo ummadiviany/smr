@@ -56,6 +56,11 @@ parser.add_argument('--sampling_strategy', type=str, help='Sampling strategy for
 parser.add_argument('--cropstore', default=False, action=argparse.BooleanOptionalAction)
 
 parser.add_argument('--filename', type=str, help='Name of the file to save the model')
+parser.add_argument('--l2reg', default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument('--alpha', type=float, default=0.1, help='Lambda for l2 regularization')
+parser.add_argument('--ewc', default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument('--ewc_weight', type=float, default=1.0, help='Lambda for EWC regularization')
+
 
 parsed_args = parser.parse_args()
 
@@ -77,6 +82,10 @@ sampling_strategy = None
 sampling_strategy = parsed_args.sampling_strategy
 cropstore = parsed_args.cropstore
 filename = parsed_args.filename
+ewc = parsed_args.ewc
+ewc_weight = parsed_args.ewc_weight
+l2reg = parsed_args.l2reg
+alpha = parsed_args.alpha
 
 if order_reverse:
     domain_order = domain_order[::-1]
@@ -104,7 +113,15 @@ print('-'*100)
 torch.manual_seed(seed)
 set_determinism(seed=seed)
 
-# ----------------------------Train Config-----------------------------------------
+# --------------------------------------------------------------------------------
+dataloaders_map, dataset_map = get_dataloaders()
+# Map idx to paths
+from utils import idx2path
+idx2path(dataset_map)
+pos_class_map = {}
+importance_map = {}
+prev_grads_map = {}
+# ----------------------------Train Config----------------------------------------
 
 model = UNet(
         spatial_dims=2,
@@ -133,7 +150,7 @@ dice_ce_loss = DiceCELoss(to_onehot_y=True, softmax=True,)
 
 if wandb_log:
     wandb.login()
-    wandb.init(project="TaskInc_Sequential", entity="vinayu", config = vars(parsed_args))
+    wandb.init(project="CL_Sequential", entity="vinayu", config = vars(parsed_args))
     
 batch_size = 1
 test_shuffle = True
@@ -141,6 +158,17 @@ val_interval = 5
 batch_interval = 25
 img_log_interval = 15
 log_images = False
+
+# --------------------------------------------------------------------------------
+from importance import get_importance
+from baselines import EWC, L2Reg
+from copy import deepcopy
+
+if l2reg:
+    l2_regulizer = L2Reg(alpha)
+if ewc:
+    ewc_regulizer = ewc = EWC(model=model, weight=ewc_weight)
+# --------------------------------------------------------------------
 
 def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
     """
@@ -154,9 +182,29 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
     model.train()
     print('\n')
     
-    
     # Iterating over the dataset
-    for i, (imgs, labels) in enumerate(train_loader, 1):
+    for i, (imgs, labels, index) in enumerate(train_loader, 1):
+        
+        index = index.item()
+        if dataset_name == domain_order[0] and epoch == 1:
+            # Positive class ranking
+            pos_precentage = labels.sum() / labels.numel()
+            pos_class_map[dataset_name][index] = pos_precentage.item()
+            
+            
+        if sampling_strategy == 'importance' or cropstore == True:
+            # Find the sample importance using gradients
+            if index not in importance_map[dataset_name]:
+                importance_map[dataset_name][index] = 0
+                
+            imgs, labels = imgs.to(device), labels.to(device)
+            loss = dice_ce_loss(model(imgs), labels)
+            loss.backward()
+            curr_grads = model.parameters.grad.data.detach().clone().cpu()
+            importance_map[dataset_name][index] += get_importance(curr_grads, prev_grads_map[dataset_name][index])
+            prev_grads_map[dataset_name][index] = curr_grads
+            
+            # torch.cuda.empty_cache()
         
         if em_loader is not None:
             if isinstance(em_loader, dict):
@@ -183,7 +231,20 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
         preds = model(imgs)
 
         loss = dice_ce_loss(preds, labels)
+        
+        if dataset_name != domain_order[0] and l2reg == True:
+            # Adding L2 regularization to the loss
+            # L2 regularization is only added to the loss after the first domain is trained
+            prev_dataset_name = domain_order[domain_order.index(dataset_name) - 1]
+            l2_loss = l2_regulizer(model, models_map[prev_dataset_name])
+            # print(f"l2_loss : {l2_loss:.3f}")
+            loss += l2_loss
 
+        if ewc:
+            # Adding EWC regularization loss to the main loss
+            ewc_loss = ewc.compute_consolidation_loss()
+            loss += ewc_loss
+        
         preds = [post_pred(i) for i in decollate_batch(preds)]
         preds = torch.stack(preds)
         labels = [post_label(i) for i in decollate_batch(labels)]
@@ -221,6 +282,14 @@ def train(train_loader : DataLoader, em_loader : DataLoader|dict = None):
     hd_metric.reset()
     scheduler.step()
     
+    # Sort and normalize the importance_map and pos_class_map
+    if sampling_strategy == 'importance':
+        importance_map[dataset_name] = dict(sorted(importance_map[dataset_name].items(), key=lambda item: item[1], reverse=True))
+        max_val = max(importance_map[dataset_name].values())
+        for key in importance_map[dataset_name]:
+            importance_map[dataset_name][key] = importance_map[dataset_name][key] / max_val
+    pos_class_map[dataset_name] = dict(sorted(pos_class_map[dataset_name].items(), key=lambda item: item[1], reverse=True))
+    
     
 def validate(test_loader : DataLoader, dataset_name : str = None):
     """
@@ -232,7 +301,7 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
     model.eval()
     with torch.no_grad():
         # Iterate over all samples in the dataset
-        for i, (imgs, labels) in enumerate(test_loader, 1):
+        for i, (imgs, labels, index) in enumerate(test_loader, 1):
             imgs, labels = imgs.to(device), labels.to(device)
             imgs = rearrange(imgs, 'b c h w d -> (b d) c h w')
             labels = rearrange(labels, 'b c h w d -> (b d) c h w')
@@ -339,9 +408,11 @@ optimizer_params  = {
     'adam' : {'weight_decay': 1e-5,},   
 }
 
+models_map = {}
 test_metrics = []
-# epochs_list = [80, 70, 60]
-epochs_list = [initial_epochs]*len(domain_order)
+epochs_list = [100, 75, 50, 25]
+# epochs_list = [initial_epochs]*len(domain_order)
+# epochs_list = [1, 1, 1, 1]
 
 for i, dataset_name in enumerate(domain_order, 1):
     print(f"Training on {dataset_name} domain")
@@ -363,9 +434,12 @@ for i, dataset_name in enumerate(domain_order, 1):
                                         label_paths = replay_buffer['train']['labels'],
                                         train=True)
                                     
-    test_dataset_names = ['prostate', 'hippo', 'spleen']
+    test_dataset_names = ['prostate158', 'isbi', 'promise12', 'decathlon']
 
     metric_prefix  = i
+    pos_class_map[dataset_name] = {}
+    importance_map[dataset_name] = {}
+    prev_grads_map[dataset_name] = {}
     
     for epoch in range(1, epochs + 1):   
         
@@ -401,6 +475,13 @@ for i, dataset_name in enumerate(domain_order, 1):
     if use_replay:
         # Store samples to replay buffer using the sampling strategy
         accumulate_replay_buffer(sampling_strategy = sampling_strategy)    
+        
+    if l2reg:
+        models_map[dataset_name] = deepcopy(model)
+    if ewc:
+        print("Updating model weights with EWC Constraint")
+        ewc.register_ewc_params(train_loader)
+        
 
 
 cl_metrics = print_cl_metrics(domain_order, test_dataset_names, test_metrics)
@@ -412,5 +493,5 @@ if wandb_log:
 if os.path.exists('replay_buffer'):
     shutil.rmtree('replay_buffer')
 
-
+# Save the model
 torch.save(model.state_dict(), f'{filename}.pth')

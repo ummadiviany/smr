@@ -43,6 +43,8 @@ parser.add_argument('--epochs', type=int, help='No of epochs', required=True)
 parser.add_argument('--lr', type=float, help='Learning rate', required=True)
 parser.add_argument('--wandb_log', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--seed', type=int, help='Seed', default='2000')
+parser.add_argument('--filename', type=str, help='Name of the file to be saved', required=True)
+parser.add_argument('--roi_size', type=int, help='Size of the roi to be cropped', default='160')
 
 parsed_args = parser.parse_args()
 
@@ -52,6 +54,8 @@ epochs = parsed_args.epochs
 initial_lr = parsed_args.lr
 wandb_log = parsed_args.wandb_log
 seed = parsed_args.seed
+filename = parsed_args.filename
+roi_size = parsed_args.roi_size
 
 print(f"Training on {device}")
 print(f"No of epochs : {epochs}")
@@ -69,12 +73,14 @@ dataloaders_map, dataset_map = get_dataloaders()
 img_paths = []
 label_paths = []
 for dataset in dataset_map:
-    img_paths += dataset_map[dataset]['train']['images']
-    label_paths += dataset_map[dataset]['train']['labels']
+    if dataset in ['harp', 'drayd']:
+        img_paths += dataset_map[dataset]['train']['images']
+        label_paths += dataset_map[dataset]['train']['labels']
 joint_train_loader = get_dataloader(
     img_paths = img_paths,
     label_paths = label_paths,
     train = True,
+    train_roi_size = roi_size,
 )
 
 # ----------------------------Train Config-----------------------------------------------
@@ -94,7 +100,7 @@ dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nan
 hd_metric = HausdorffDistanceMetric(include_background=False, percentile = 95.)
 post_pred = Compose([
     EnsureType(), AsDiscrete(argmax=True, to_onehot=2),
-    KeepLargestConnectedComponent(applied_labels=[1], is_onehot=True, connectivity=2)
+    # KeepLargestConnectedComponent(applied_labels=[1], is_onehot=True, connectivity=2)
 ])
 post_label = Compose([EnsureType(), AsDiscrete(to_onehot=2)])
 argmax = AsDiscrete(argmax=True)
@@ -129,7 +135,7 @@ config = {
 
 if wandb_log:
     wandb.login()
-    wandb.init(project="CL_Joint", entity="vinayu", config = config)
+    wandb.init(project="HPF_Joint", entity="vinayu", config = config)
     
 batch_size = 1
 test_shuffle = True
@@ -153,7 +159,7 @@ def train(train_loaders : dict, em_loader : DataLoader = None):
     
     
     # Iterating over the dataset
-    for i, (imgs, labels) in enumerate(joint_train_loader):
+    for i, (imgs, labels, _) in enumerate(joint_train_loader):
         
         imgs, labels = imgs.to(device), labels.to(device)
         
@@ -220,8 +226,8 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
             imgs = rearrange(imgs, 'b c h w d -> (b d) c h w')
             labels = rearrange(labels, 'b c h w d -> (b d) c h w')
            
-            roi_size = (160, 160)
-            preds = sliding_window_inference(inputs=imgs, roi_size=roi_size, sw_batch_size=4,
+            troi_size = (roi_size, roi_size)
+            preds = sliding_window_inference(inputs=imgs, roi_size=troi_size, sw_batch_size=4,
                                             predictor=model, overlap = 0.5, mode = 'gaussian', device=device)
             
             preds = [post_pred(i) for i in decollate_batch(preds)]
@@ -254,7 +260,7 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
     
 # -------------------------------Training Loop----------------------------------------
 
-test_dataset_names = ['prostate158', 'isbi', 'promise12', 'decathlon']
+test_dataset_names = ['harp', 'drayd']
 
 for epoch in range(1, epochs+1):   
 
@@ -276,5 +282,4 @@ for epoch in range(1, epochs+1):
                 
                 
 # Save the model
-filename = f'prostate_joint'
 torch.save(model.state_dict(), f"{filename}.pth")

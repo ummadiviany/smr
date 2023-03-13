@@ -14,5 +14,5 @@ taskinc/seq/replay_buffer/
 *pth
 taskinc/models/*
 taskinc/results/artifacts/*
-models/*
-replay_buffer/*
+models/
+replay_buffer/

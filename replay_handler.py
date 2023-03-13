@@ -33,8 +33,6 @@ seed = 2000
 torch.manual_seed(seed)
 set_determinism(seed=seed)
 
-
-
 # Transforms for images & labels
 class CropRoI(monai.transforms.Transform):
     def __init__(self, roi_size: tuple | list|int, center: tuple | list | int = None, random_center: bool = False):
@@ -58,8 +56,7 @@ class CropRoI(monai.transforms.Transform):
                            :]
             return cropped
         
-        
-
+    
 centers = {
     'prostate158': (128, 128),
     'isbi': (128, 128),
@@ -121,7 +118,9 @@ def crop_save(
         
         if dataset_name in ['prostate158', 'isbi', 'promise12', 'decathlon']:
             croproi = CropRoI(roi_size=roi_size[dataset_name], center=label.shape[1]//2, random_center=False)
-        
+        else:
+            croproi = CropRoI(roi_size=roi_size[dataset_name], center=(label.shape[0]//2, label.shape[1]//2), random_center=False)
+            
         img, label = croproi(img), croproi(label)
         print(f'Crop RoI img shape: {img.shape}')
         print(f'Crop RoI label shape: {label.shape}')

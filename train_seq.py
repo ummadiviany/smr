@@ -62,6 +62,7 @@ parser.add_argument('--alpha', type=float, default=0.1, help='Lambda for l2 regu
 parser.add_argument('--ewc', default=False, action=argparse.BooleanOptionalAction)
 parser.add_argument('--ewc_weight', type=float, default=1.0, help='Lambda for EWC regularization')
 parser.add_argument('--latent_replay', default=False, action=argparse.BooleanOptionalAction)
+parser.add_argument('--roi_size', type=int, help='Size of the roi to be cropped', default=160)
 
 parsed_args = parser.parse_args()
 
@@ -88,6 +89,7 @@ ewc_weight = parsed_args.ewc_weight
 l2reg = parsed_args.l2reg
 alpha = parsed_args.alpha
 latent_replay = parsed_args.latent_replay
+roi_size = parsed_args.roi_size
 
 if order_reverse:
     domain_order = domain_order[::-1]
@@ -116,7 +118,7 @@ torch.manual_seed(seed)
 set_determinism(seed=seed)
 
 # --------------------------------------------------------------------------------
-dataloaders_map, dataset_map = get_dataloaders()
+dataloaders_map, dataset_map = get_dataloaders(train_roi_size=roi_size)
 # Map idx to paths
 from utils import idx2path
 idx2path(dataset_map)
@@ -152,7 +154,7 @@ dice_ce_loss = DiceCELoss(to_onehot_y=True, softmax=True,)
 
 if wandb_log:
     wandb.login()
-    wandb.init(project="CL_Sequential", entity="vinayu", config = vars(parsed_args))
+    wandb.init(project="HPF_Sequential", entity="vinayu", config = vars(parsed_args))
     
 batch_size = 1
 test_shuffle = True
@@ -368,8 +370,8 @@ def validate(test_loader : DataLoader, dataset_name : str = None):
             labels = rearrange(labels, 'b c h w d -> (b d) c h w')
 
             # preds = model(imgs)
-            roi_size = (160, 160)
-            preds = sliding_window_inference(inputs=imgs, roi_size=roi_size, sw_batch_size=4,
+            troi_size = (roi_size, roi_size)
+            preds = sliding_window_inference(inputs=imgs, roi_size=troi_size, sw_batch_size=4,
                                                 predictor=model, overlap = 0.5, mode = 'gaussian', device=device)
             
             preds = [post_pred(i) for i in decollate_batch(preds)]
@@ -477,13 +479,14 @@ optimizer_params  = {
 models_map = {}
 test_metrics = []
 epochs_list = [80, 60, 40, 20]
+epochs_list = [60, 30]
 # epochs_list = [initial_epochs]*len(domain_order)
 # epochs_list = [1, 1, 1, 1]
 
 for i, dataset_name in enumerate(domain_order, 1):
     print(f"Training on {dataset_name} domain")
     
-    epochs = int(initial_epochs * (epoch_decay**(i-1)))
+    # epochs = int(initial_epochs * (epoch_decay**(i-1)))
     epochs = epochs_list[i-1]
     lr = initial_lr * (lr_decay**(i-1))
     
@@ -500,7 +503,8 @@ for i, dataset_name in enumerate(domain_order, 1):
                                         label_paths = replay_buffer['train']['labels'],
                                         train=True)
                                     
-    test_dataset_names = ['prostate158', 'isbi', 'promise12', 'decathlon']
+    # test_dataset_names = ['prostate158', 'isbi', 'promise12', 'decathlon']
+    test_dataset_names = ['harp', 'drayd']
 
     metric_prefix  = i
     pos_class_map[dataset_name] = {}
@@ -551,8 +555,7 @@ for i, dataset_name in enumerate(domain_order, 1):
     if latent_replay:
         accumulate_latent_replay_memory()
         
-
-
+        
 cl_metrics = print_cl_metrics(domain_order, test_dataset_names, test_metrics)
 if wandb_log:
     wandb.log(cl_metrics)

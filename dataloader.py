@@ -42,12 +42,37 @@ def get_img_label_folds(img_paths, label_paths):
     fold_labels = [label_paths[i] for i in fold]
     return fold_imgs, fold_labels
 
-def get_dataloader(img_paths : list, label_paths : list, train : bool):
+def get_dataloader(img_paths : list, label_paths : list, train : bool, train_roi_size : int = 160):
     
     if train:
         ttset = "train"
     else:
         ttset = "test"
+        
+    # Transforms for images & labels
+    transforms_map = {
+            "train_img_transform" : [
+                AddChannel(),
+                RandSpatialCrop(roi_size= train_roi_size, random_center = True, random_size=False),
+                ToTensor()
+                ],
+            "train_label_transform" : [
+                AddChannel(),
+                RandSpatialCrop(roi_size= train_roi_size, random_center = True, random_size=False),
+                AsDiscrete(threshold=0.5),
+                ToTensor()
+                ],
+            "test_img_transform" : [
+                AddChannel(),
+                ToTensor()
+                ],
+            "test_label_transform" : [
+                AddChannel(),
+                AsDiscrete(threshold=0.5),
+                ToTensor()
+                ],
+        }
+
                 
     dataset = ImageDataset(img_paths, label_paths,
                             transform=Compose(transforms_map[f'{ttset}_img_transform']), 
@@ -60,31 +85,6 @@ def get_dataloader(img_paths : list, label_paths : list, train : bool):
 batch_size = 1
 train_roi_size = 160
 resize_dim = 256
-
-# Transforms for images & labels
-transforms_map = {
-        "train_img_transform" : [
-            AddChannel(),
-            RandSpatialCrop(roi_size= train_roi_size, random_center = True, random_size=False),
-            ToTensor()
-            ],
-        "train_label_transform" : [
-            AddChannel(),
-            RandSpatialCrop(roi_size= train_roi_size, random_center = True, random_size=False),
-            AsDiscrete(threshold=0.5),
-            ToTensor()
-            ],
-        "test_img_transform" : [
-            AddChannel(),
-            ToTensor()
-            ],
-        "test_label_transform" : [
-            AddChannel(),
-            AsDiscrete(threshold=0.5),
-            ToTensor()
-            ],
-    }
-
 
 # 1. Image & Label paths
 dataset_map = {
@@ -129,10 +129,22 @@ dataset_map = {
             "test_size" : 0.2,
             'test' :  {'images' : [], 'labels' : []},
             'train' :  {'images' : [], 'labels' : []}
+            },
+        "harp" : {
+            "data_dir" : "../cl/hippo/harp_pax/",
+            "test_size" : 0.2,
+            'test' :  {'images' : [], 'labels' : []},
+            'train' :  {'images' : [], 'labels' : []}
+            },
+        "drayd" : {
+            "data_dir" : "../cl/hippo/drayd_pax/",
+            "test_size" : 0.2,
+            'test' :  {'images' : [], 'labels' : []},
+            'train' :  {'images' : [], 'labels' : []}
             },   
     }
 
-def get_dataloaders():
+def get_dataloaders(train_roi_size : int = 160):
     
     for dataset in dataset_map:
         print(f"------------{dataset}------------")
@@ -182,6 +194,7 @@ def get_dataloaders():
             dataloaders_map[dataset][ttset] = get_dataloader(img_paths = dataset_map[dataset][ttset]['images'],
                                                             label_paths = dataset_map[dataset][ttset]['labels'],
                                                             train = train,
+                                                            train_roi_size = train_roi_size,
                                                             )
             
             # print(f"""No of samples in {dataset}-{ttset} : {len(dataloaders_map[dataset][ttset])}""")
